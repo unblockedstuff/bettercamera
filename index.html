@@ -612,7 +612,7 @@ function onStreamError(err) {
   } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
     camError.textContent = 'No camera found on this device.';
   } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-    camError.textContent = 'Camera is already in use by another app. Close it and try again.';
+    camError.textContent = 'Camera hardware busy. Please wait a moment and try again.';
   } else if (err.name === 'OverconstrainedError') {
     // Retry with basic constraints
     navigator.mediaDevices.getUserMedia({ video: true, audio: false })
@@ -625,9 +625,30 @@ function onStreamError(err) {
   }
 }
 
-function requestCamera(facing) {
-  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+// Pick the preferred deviceId from an already-enumerated device list.
+// Returns null if no clear match (caller falls back to facingMode constraint).
+function pickDeviceId(devices, facing) {
+  const videoDevices = devices.filter(d => d.kind === 'videoinput');
 
+  if (facing === 'environment') {
+    // Rear cameras: prefer ones without "wide" in label (avoid ultra-wide 0.5x)
+    const rear = videoDevices.filter(d => {
+      const l = d.label.toLowerCase();
+      return l.includes('back') || l.includes('rear') || l.includes('environment') ||
+             (!l.includes('front') && !l.includes('user'));
+    });
+    const main = rear.find(d => !d.label.toLowerCase().includes('wide')) || rear[0];
+    return main ? main.deviceId : null;
+  } else {
+    const front = videoDevices.find(d => {
+      const l = d.label.toLowerCase();
+      return l.includes('front') || l.includes('user') || l.includes('face');
+    });
+    return front ? front.deviceId : null;
+  }
+}
+
+function requestCamera(facing) {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     showCamError('Camera not supported in this browser. Try Chrome or Safari.');
     return;
@@ -637,49 +658,54 @@ function requestCamera(facing) {
   startCamBtn.textContent = 'starting…';
   camError.classList.remove('show');
 
-  // Mirror front camera
+  // Mirror front camera in the live preview
   liveCanvas.style.transform = facing === 'user' ? 'scaleX(-1)' : 'none';
 
-  // Step 1: basic request — triggers the permission dialog (synchronous within click)
-  // Step 2: stop temp stream, wait for hardware to release, enumerate, pick best camera
-  navigator.mediaDevices
-    .getUserMedia({ video: { facingMode: facing }, audio: false })
-    .then(function(tempStream) {
-      // Stop ALL tracks and wait for Android to release the camera hardware
-      tempStream.getTracks().forEach(t => t.stop());
-      return new Promise(function(resolve) { setTimeout(resolve, 500); });
-    })
-    .then(function() {
-      return navigator.mediaDevices.enumerateDevices();
-    })
-    .then(function(devices) {
-      const videoDevices = devices.filter(d => d.kind === "videoinput");
-      let deviceId = null;
+  // Capture reference to any existing stream so we can stop it cleanly,
+  // then null out the global immediately so onStream doesn't double-stop.
+  const prevStream = stream;
+  stream = null;
 
-      if (facing === "environment") {
-        // Rear cameras: prefer ones without "wide" in label (avoid ultra-wide 0.5x)
-        const rear = videoDevices.filter(d => {
-          const l = d.label.toLowerCase();
-          return l.includes("back") || l.includes("rear") || l.includes("environment") || (!l.includes("front") && !l.includes("user"));
+  function doRequest() {
+    // Step 1: open camera with facingMode to trigger the permission dialog
+    // and get device labels (permission required for labels on Android).
+    navigator.mediaDevices
+      .getUserMedia({ video: { facingMode: { ideal: facing } }, audio: false })
+      .then(function(initialStream) {
+        // Step 2: enumerate devices — labels are now available.
+        return navigator.mediaDevices.enumerateDevices().then(function(devices) {
+          const preferred = pickDeviceId(devices, facing);
+          const current   = initialStream.getVideoTracks()[0].getSettings().deviceId;
+
+          // If the browser already gave us the preferred camera, use it directly.
+          // This avoids stop→restart entirely and is the common case on Android.
+          if (!preferred || preferred === current) {
+            return initialStream;
+          }
+
+          // Wrong camera (e.g. got ultra-wide instead of main).
+          // Stop it, give Android time to release the hardware, then reopen.
+          initialStream.getTracks().forEach(t => t.stop());
+          return new Promise(function(resolve) { setTimeout(resolve, 600); })
+            .then(function() {
+              return navigator.mediaDevices.getUserMedia({
+                video: { deviceId: { exact: preferred } },
+                audio: false
+              });
+            });
         });
-        const main = rear.find(d => !d.label.toLowerCase().includes("wide")) || rear[0];
-        if (main) deviceId = main.deviceId;
-      } else {
-        const front = videoDevices.find(d => {
-          const l = d.label.toLowerCase();
-          return l.includes("front") || l.includes("user") || l.includes("face");
-        });
-        if (front) deviceId = front.deviceId;
-      }
+      })
+      .then(onStream)
+      .catch(onStreamError);
+  }
 
-      const constraints = deviceId
-        ? { video: { deviceId: { exact: deviceId } }, audio: false }
-        : { video: { facingMode: facing }, audio: false };
-
-      return navigator.mediaDevices.getUserMedia(constraints);
-    })
-    .then(onStream)
-    .catch(onStreamError);
+  if (prevStream) {
+    // Stop old stream first, then wait for Android to release hardware before opening new one.
+    prevStream.getTracks().forEach(t => t.stop());
+    setTimeout(doRequest, 500);
+  } else {
+    doRequest();
+  }
 }
 
 function renderLoop() {
