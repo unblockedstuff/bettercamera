@@ -640,32 +640,34 @@ function requestCamera(facing) {
   // Mirror front camera
   liveCanvas.style.transform = facing === 'user' ? 'scaleX(-1)' : 'none';
 
-  // Step 1: basic request to trigger permission dialog (synchronous within click)
-  // Step 2: once we have permission, enumerate devices to pick the main rear camera
+  // Step 1: basic request — triggers the permission dialog (synchronous within click)
+  // Step 2: stop temp stream, wait for hardware to release, enumerate, pick best camera
   navigator.mediaDevices
     .getUserMedia({ video: { facingMode: facing }, audio: false })
     .then(function(tempStream) {
+      // Stop ALL tracks and wait for Android to release the camera hardware
       tempStream.getTracks().forEach(t => t.stop());
-      // Now enumerate — labels are available after permission is granted
+      return new Promise(function(resolve) { setTimeout(resolve, 500); });
+    })
+    .then(function() {
       return navigator.mediaDevices.enumerateDevices();
     })
     .then(function(devices) {
-      const videoDevices = devices.filter(d => d.kind === 'videoinput');
+      const videoDevices = devices.filter(d => d.kind === "videoinput");
       let deviceId = null;
 
-      if (facing === 'environment') {
-        // Rear cameras: prefer ones without 'wide' in label (avoid ultra-wide 0.5x)
+      if (facing === "environment") {
+        // Rear cameras: prefer ones without "wide" in label (avoid ultra-wide 0.5x)
         const rear = videoDevices.filter(d => {
           const l = d.label.toLowerCase();
-          return l.includes('back') || l.includes('rear') || l.includes('environment') || (!l.includes('front') && !l.includes('user'));
+          return l.includes("back") || l.includes("rear") || l.includes("environment") || (!l.includes("front") && !l.includes("user"));
         });
-        const main = rear.find(d => !d.label.toLowerCase().includes('wide')) || rear[0];
+        const main = rear.find(d => !d.label.toLowerCase().includes("wide")) || rear[0];
         if (main) deviceId = main.deviceId;
       } else {
-        // Front camera
         const front = videoDevices.find(d => {
           const l = d.label.toLowerCase();
-          return l.includes('front') || l.includes('user') || l.includes('face');
+          return l.includes("front") || l.includes("user") || l.includes("face");
         });
         if (front) deviceId = front.deviceId;
       }
